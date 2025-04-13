@@ -1,0 +1,343 @@
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import sqlite3
+import os
+import asyncio
+import settings
+
+
+
+
+import sys
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    filename='bot.log'
+)
+
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
+bot = Bot(token=settings.token)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+
+
+
+# Подключение к базе данных
+def get_db_connection():
+    conn = sqlite3.connect('catalog.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+
+
+
+
+
+# Генерация главного меню
+async def get_main_menu():
+    conn = get_db_connection()
+    categories = conn.execute("SELECT * FROM categories").fetchall()
+    conn.close()
+
+    builder = InlineKeyboardBuilder()
+    for category in categories:
+        builder.add(InlineKeyboardButton(
+            text=category["display_name"],
+            callback_data=f"category_{category['id']}"
+        ))
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+# Обработчик команды /start
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    try:
+        user_name = message.from_user.full_name
+        logger.info(f"Пользователь {user_name} запустил бота")
+
+        welcome_text = (
+            f"<b>{user_name}</b>, Привет! Я - BullBot!\n"
+            "Я покажу товары, которые мы предоставляем. Выбери категорию:"
+        )
+
+        markup = await get_main_menu()
+        await message.answer(
+            text=welcome_text,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике start: {e}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+
+# Обработчик команды /admin
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    admin_ids = [210848670, 5816722566, 1207095923]  # Замените на ваши ID админов
+    if message.from_user.id not in admin_ids:
+        await message.answer("У вас нет прав доступа к этой команде.")
+        return
+
+    logger.info(f"Администратор {message.from_user.full_name} вошел в панель управления")
+
+    await message.answer("Активирую режим разработчика...")
+    await message.answer(
+        "Активировано. Чтобы перейти в админ-бота, нажмите кнопку ниже.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Перейти в админ-бота",
+                url="https://t.me/Bullmark_adminbot"
+            )]
+        ])
+    )
+
+
+# Обработчик выбора категории
+@dp.callback_query(lambda c: c.data.startswith('category_'))
+async def process_category(callback_query: types.CallbackQuery):
+    data_parts = callback_query.data.split('_')
+
+    # Проверяем корректность переданных данных
+    if len(data_parts) > 1 and data_parts[1].isdigit():
+        category_id = int(data_parts[1])
+    else:
+        logger.error(f"Некорректное callback_data: {callback_query.data}")
+        await callback_query.answer("Ошибка: неверный формат данных.")
+        return
+
+    conn = get_db_connection()
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    subcategories = conn.execute("SELECT * FROM subcategories WHERE category_id = ?", (category_id,)).fetchall()
+    conn.close()
+
+    if not category:
+        logger.error(f"Категория с ID {category_id} не найдена.")
+        await callback_query.answer("Ошибка: категория не найдена.")
+        return
+
+    if not subcategories:
+        await show_products(callback_query, category_id=category_id)
+    else:
+        builder = InlineKeyboardBuilder()
+        for subcat in subcategories:
+            builder.add(InlineKeyboardButton(
+                text=subcat["display_name"],
+                callback_data=f"subcategory_{subcat['id']}"
+            ))
+        builder.add(InlineKeyboardButton(
+            text="Вернуться",
+            callback_data="back_to_main"
+        ))
+        builder.adjust(2)
+
+        await callback_query.message.edit_text(
+            text=f"Выбери нужную тебе модель ({category['display_name']})",
+            reply_markup=builder.as_markup()
+        )
+
+    await callback_query.answer()
+
+
+
+
+from aiogram.types import CallbackQuery
+
+
+# Обработчик выбора подкатегории
+@dp.callback_query(lambda c: c.data.startswith('subcategory_'))
+async def process_subcategory(callback_query: CallbackQuery):
+    data_parts = callback_query.data.split('_')
+    if len(data_parts) > 1 and data_parts[1].isdigit():
+        subcategory_id = int(data_parts[1])
+    else:
+        logger.error(f"Некорректное callback_data: {callback_query.data}")
+        await callback_query.answer("Ошибка: неверный формат данных.")
+        return
+
+    conn = get_db_connection()
+    subcategory = conn.execute("SELECT * FROM subcategories WHERE id = ?", (subcategory_id,)).fetchone()
+    nested_subcategories = conn.execute(
+        "SELECT * FROM nested_subcategories WHERE subcategory_id = ?",
+        (subcategory_id,)
+    ).fetchall()
+    conn.close()
+
+    if not nested_subcategories:
+        await show_products(callback_query, subcategory_id=subcategory_id)
+    else:
+        # Генерация клавиатуры
+        builder = InlineKeyboardBuilder()
+        for nested in nested_subcategories:
+            builder.add(InlineKeyboardButton(
+                text=nested["display_name"],
+                callback_data=f"nested_{nested['id']}"
+            ))
+        builder.add(InlineKeyboardButton(
+            text="Вернуться",
+            callback_data=f"category_{subcategory['category_id']}"
+        ))
+        builder.adjust(2)
+
+        # Используем safe_edit_message для предотвращения ошибки
+        await callback_query.message.edit_text(
+            new_text=f"А теперь, надо выбрать модель ({subcategory['display_name']})",
+            new_reply_markup=builder.as_markup()
+        )
+
+    await callback_query.answer()
+
+
+
+# Обработчик выбора вложенной подкатегории
+@dp.callback_query(lambda c: c.data.startswith('nested_'))
+async def process_nested_subcategory(callback_query: types.CallbackQuery):
+    nested_id = int(callback_query.data.split('_')[1])
+    await show_products(callback_query, nested_subcategory_id=nested_id)
+
+
+# Показать товары
+async def show_products(
+        callback_query: types.CallbackQuery,
+        category_id=None,
+        subcategory_id=None,
+        nested_subcategory_id=None,
+        offset=0,
+        limit=10
+):
+    conn = get_db_connection()
+
+    query = "SELECT * FROM products WHERE "
+    params = []
+
+    if category_id:
+        query += "category_id = ?"
+        params.append(category_id)
+    elif subcategory_id:
+        query += "subcategory_id = ?"
+        params.append(subcategory_id)
+    elif nested_subcategory_id:
+        query += "nested_subcategory_id = ?"
+        params.append(nested_subcategory_id)
+
+    query += " LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    products = conn.execute(query, params).fetchall()
+    total_products = conn.execute(
+        "SELECT COUNT(*) FROM products WHERE " + query.split("WHERE")[1].split("LIMIT")[0],
+        params[:-2]
+    ).fetchone()[0]
+    conn.close()
+
+    if not products:
+        await callback_query.answer(
+            text="Товары не найдены",
+            show_alert=True
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+
+    for product in products:
+        builder.add(InlineKeyboardButton(
+            text=f"{product['name']} - {product['price']}₽",
+            url="https://t.me/GeoTorbae"
+        ))
+
+    # Кнопка для перехода к следующей странице
+    if offset + limit < total_products:
+        next_data = f"products_{category_id or ''}_{subcategory_id or ''}_{nested_subcategory_id or ''}_{offset + limit}"
+        builder.add(InlineKeyboardButton(
+            text=">>>>",
+            callback_data=next_data
+        ))
+
+    # Проверяем, что ID не является None
+    category_id = str(category_id) if category_id is not None else ""
+    subcategory_id = str(subcategory_id) if subcategory_id is not None else ""
+    nested_subcategory_id = str(nested_subcategory_id) if nested_subcategory_id is not None else ""
+
+    # Логика возврата назад
+    if nested_subcategory_id:
+        back_data = f"subcategory_{subcategory_id}" if subcategory_id else "back_to_main"
+    elif subcategory_id:
+        back_data = f"category_{category_id}" if category_id else "back_to_main"
+    else:
+        back_data = "back_to_main"
+
+    builder.add(InlineKeyboardButton(
+        text="Вернуться",
+        callback_data=back_data
+    ))
+    builder.adjust(1)
+
+    await callback_query.message.edit_text(
+        text="Выбери конфигурацию!",
+        reply_markup=builder.as_markup()
+    )
+
+    await callback_query.answer()
+
+
+
+# Обработчик пагинации товаров
+@dp.callback_query(lambda c: c.data.startswith('products_'))
+async def process_products_pagination(callback_query: CallbackQuery):
+    _, category_id, subcategory_id, nested_subcategory_id, offset = callback_query.data.split('_')
+
+    category_id = int(category_id) if category_id else None
+    subcategory_id = int(subcategory_id) if subcategory_id else None
+    nested_subcategory_id = int(nested_subcategory_id) if nested_subcategory_id else None
+    offset = int(offset)
+
+    await show_products(
+        callback_query,
+        category_id=category_id,
+        subcategory_id=subcategory_id,
+        nested_subcategory_id=nested_subcategory_id,
+        offset=offset
+    )
+
+
+
+# Обработчик возврата в главное меню
+@dp.callback_query(lambda c: c.data == 'back_to_main')
+async def process_back_to_main(callback_query: types.CallbackQuery):
+    markup = await get_main_menu()
+    await callback_query.message.edit_text(
+        text="Выбери категорию, которую хочешь посмотреть!",
+        reply_markup=markup
+    )
+    await callback_query.answer()
+
+
+# Обработчик неизвестных сообщений
+@dp.message()
+async def unknown_message(message: types.Message):
+    await message.answer("Извините, я не понимаю эту команду. Используйте /start для начала работы.")
+
+
+# Запуск бота
+async def main():
+    logger.info("Бот запускается...")
+    await dp.start_polling(bot)
+
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
+    except Exception as e:
+        logger.critical(f"Критическая ошибка: {e}")
