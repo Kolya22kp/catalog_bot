@@ -84,7 +84,7 @@ async def cmd_start(message: types.Message):
 # Обработчик команды /admin
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    admin_ids = [210848670, 5816722566, 1207095923]  # Замените на ваши ID админов
+    admin_ids = []  # Замените на ваши ID админов
     if message.from_user.id not in admin_ids:
         await message.answer("У вас нет прав доступа к этой команде.")
         return
@@ -252,7 +252,7 @@ async def show_products(
     for product in products:
         builder.add(InlineKeyboardButton(
             text=f"{product['name']} - {product['price']}₽",
-            url="https://t.me/GeoTorbae"
+            url="" # на кого перенаправлять (ссылка t.me/...)
         ))
 
     if offset + limit < total_products:
